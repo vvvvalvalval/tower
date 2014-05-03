@@ -362,13 +362,14 @@
                                    dict) e))))))
 
 
-(def ^:private generalizations
+(def ^:private generalizations ; does what loc-tree used to do.
+  "The sequence of parents locs of a loc, including itself."
   (memoize
     (fn generalizations-non-memoized [loc]
-           (let [loc-parts (str/split (-> loc locale-key name) #"[-_]")
-                 generalizations  (mapv #(keyword (str/join "-" %))
-                             (take-while identity (iterate butlast loc-parts)))]
-             generalizations)))
+      (let [loc-parts (str/split (-> loc locale-key name) #"[-_]")
+            generalizations  (mapv #(keyword (str/join "-" %))
+                                   (take-while identity (iterate butlast loc-parts)))]
+        generalizations)))
   )
 (facts "About `generalizations`"
        (generalizations :en) => [:en]
@@ -387,6 +388,8 @@ All locales and nil specialize nil."
     true ; the nil locale generalizes all locales.
     (some? (some #{parent-loc} (generalizations child-loc)))
     ))
+(def specializes? (memoize specializes?)) ;; memoizing for better perf.
+
 (facts "About `specializes`"
        (fact "specialization nominal cases"
              (specializes? :en-US :en) => true
@@ -404,63 +407,77 @@ All locales and nil specialize nil."
              (specializes? nil nil) => true
              )
        )
-
-(defn best-locale-among
-  "Finds the best supported locale that is either an accepted locale or a parent of an accepted locale.
-Returns fallback-loc or nil if no match found.
-
-accepted-locs : a seq of locales in descending preferrence order.
-supported? : a predicate for locales. Meant to be applied to the elements of accepted-locs and their parents.
-fallback-loc : a fall-back locale in case no match is found.
-"
-  [accepted-locs supported? & [fallback-loc]]
-  (or 
-    (loop [remaining accepted-locs
-          ; the best available locale found so far, or none if not found.
-          ; on each iteration, the value of best-match must specialize the previous.
-          ; when we encounter a locale that does not specialize best-match, we return best match.
-          best-match nil 
-          ]
-     (if-let [loc (first remaining)]
-       (if (specializes? loc best-match)
-         (let [new-best-match (some supported? (generalizations loc)) ; will be a specialization of best-match.
-               ]
-           (recur (rest remaining)
-                  new-best-match
-                ))
-         best-match ; the current locale does not specialize the best match; we stop looking.
+(defn- loc-searcher [loc-lookup]
+  (fn [loc]
+    (loop [remaining-locs (generalizations loc)]
+      (if-let [l (first remaining-locs)]
+        (if-let [value (loc-lookup l)]
+          [l value] ; truthy lookup, we return the [locale,value] pair.
+          (recur (rest remaining-locs))) ; nothing, looking up generalizations.
+        nil ; no generalization of the initial loc yields a truthy lookup.
+        )
+      ))
+  )
+(facts "About `loc-searcher`"
+       (let [my-loc-lookup {:en "How are you?"
+                            :en-US "What's up?"
+                            :en-GB "How do you do?"
+                            :fr-FR "Comment allez-vous?"
+                            :de "Wie geht's?"}
+             searcher (loc-searcher my-loc-lookup)]
+         (searcher :en) => [:en "How are you?"]
+         (searcher :de) => [:de "Wie geht's?"]
+         (searcher :en-US) => [:en-US "What's up?"]
+         (searcher :fr-FR) => [:fr-FR "Comment allez-vous?"]
+         (searcher :fr) => nil
+         (searcher :ja) => nil
          )
-       best-match ; we've covered the whole list of available locales, return best match
        )
-     )
-    fallback-loc)
+
+(defn preferred-loc-lookup
+  [accepted-locs lookup-loc]
+  (let [searcher (loc-searcher lookup-loc)]
+    (loop [remaining accepted-locs
+          [best-loc value :as result] nil]
+      (if-let [loc (first remaining)]
+        (if (specializes? loc best-loc)
+          (let [[new-loc new-val :as new-result] (searcher loc)]
+            (if (= new-loc loc)
+              new-result ; perfect match.
+              (recur (rest remaining) ; at least better but not perfect match. Remember it and keep looking.
+                     new-result)
+              ))
+          result ;; no longer specializes best-loc. Stop looking.
+          )
+        result ;; covered all accepted locs. return result.
+            )))
   )
 (facts 
-  "About `best-locale-among`"
+  "About `preferred-loc-lookup`"
   
   (fact "Nominal cases" 
-    (best-locale-among [:de :en-GB :en-US :fr :en] #{:fr :en-US}) => :en-US
-    (best-locale-among [:de :en-GB :en-US :fr :en] #{:fr :en-GB}) => :en-GB
-    (best-locale-among [:de :en-GB :en-US :fr] #{:fr :en}) => :en)
+    (preferred-loc-lookup [:de :en-GB :en-US :fr :en] {:fr 1, :en-US 2}) => [:en-US 2]
+    (preferred-loc-lookup [:de :en-GB :en-US :fr :en] {:fr 1, :en-GB 2}) => [:en-GB 2]
+    (preferred-loc-lookup [:de :en-GB :en-US :fr] {:fr 1, :en 2}) => [:en 2])
   
   (fact 
-    "No specialization accepted"
-    (best-locale-among [:en] #{:en-US}) => nil
-    (best-locale-among [:en :fr] #{:en-US :fr}) => :fr)
+    "No strict specialization accepted"
+    (preferred-loc-lookup [:en] {:en-US 1}) => nil
+    (preferred-loc-lookup [:en :fr] {:en-US 1 :fr 2}) => [:fr 2])
   
-  (fact 
-    "Fallback or nil when no accepted locale has a supported generalization."
-    (best-locale-among [:fr] #{:en}) => nil
-    (best-locale-among [:fr] #{:en} :de) => :de
-    (best-locale-among [:fr] #{:fr-FR} :de) => :de)
+  (fact "An exact match for a locale trumps exact matches of subsequent specializations."
+        (preferred-loc-lookup [:en :en-US] {:en 1 :en-US 2}) => [:en 1])
   
-  (fact 
-    "Fallback or nil when the list of accepted locales is empty."
-    (best-locale-among [] #{:fr :en-US}) => nil
-    (best-locale-among [] #{:fr :en-US} :de) => :de
-    )
+  (fact "nil when no accepted locale has a supported generalization."
+    (preferred-loc-lookup [:fr] {:en 1}) => nil
+    (preferred-loc-lookup [:fr] {:fr-FR 1}) => nil)
+  
+  (fact "Fallback or nil when the list of accepted locales is empty."
+    (preferred-loc-lookup [] {:fr 1, :en-US 2}) => nil)
   
   )
+(def preferred-loc (comp first preferred-loc-lookup))
+(def preferred-value (comp second preferred-loc-lookup))
 
 
 (def ^:private loc-tree
@@ -576,37 +593,37 @@ fallback-loc : a fall-back locale in case no match is found.
 
     (let [nstr          (fn [x] (if (nil? x) "nil" (str x)))
           dict-cached   (when-not dev-mode? (dict-compile* dictionary))
-          find-scoped   (fn [d k l] (some #(get-in d [(scope-fn k) %]) (loc-tree l)))
-          find-unscoped (fn [d k l] (some #(get-in d [          k  %]) (loc-tree l)))]
+          scoped-lookup-in   (fn [d ks l] (some #(get-in d [(scope-fn %) l]) ks))
+          unscoped-lookup-in (fn [d ks l] (some #(get-in d [% l]) ks))
+          ]
 
-      (fn new-t [loc-or-locs k-or-ks & fmt-args]
-        (let [l-or-ls loc-or-locs
-              dict (or dict-cached (dict-compile* dictionary)) ; Recompile (slow)
-              ks   (if (vector? k-or-ks) k-or-ks [k-or-ks])
-              ls   (if (vector? l-or-ls) l-or-ls [l-or-ls])
+      (fn new-t [l-or-ls k-or-ks & fmt-args]
+        (let [dict (or dict-cached (dict-compile* dictionary)) ; Recompile (slow)
+              ks   (if (sequential? k-or-ks) k-or-ks [k-or-ks])
+              ls   (if (sequential? l-or-ls) l-or-ls [l-or-ls])
               loc1 (nth ls 0) ; Preferred locale (always used for fmt)
-              tr
-              (or
-               ;; Try locales & parents:
-               (some #(find-scoped dict % l-or-ls) (take-while keyword? ks))
-               (let [last-k (peek ks)]
-                 (if-not (keyword? last-k)
-                   last-k ; Explicit final, non-keyword fallback (may be nil)
-                   (do
-                     (when-let [log-f log-missing-translation-fn]
-                       (log-f {:locales ls :scope (scope-fn nil) :ks ks
-                               :dev-mode? dev-mode? :ns (str *ns*)}))
-                     (or
-                      ;; Try fallback-locale & parents:
-                      (some #(find-scoped dict % fallback-locale) ks)
-
-                      ;; Try :missing in locales, parents, fallback-loc, & parents:
-                      (when-let [pattern
-                                 (or (find-unscoped dict :missing l-or-ls)
-                                     (find-unscoped dict :missing fallback-locale))]
-                        (fmt-fn loc1 pattern (nstr ls) (nstr (scope-fn nil))
-                          (nstr ks))))))))]
-
+              kwks (take-while keyword? ks)
+              scoped-lookup (partial scoped-lookup-in dict kwks)
+              tr (or
+                  ;; Try locales & parents:
+                  (preferred-value ls scoped-lookup)
+                  (let [last-k (peek ks)]
+                    (if-not (keyword? last-k)
+                      last-k ; Explicit final, non-keyword fallback (may be nil)
+                      (do
+                        (when-let [log-f log-missing-translation-fn]
+                          (log-f {:locales ls :scope (scope-fn nil) :ks ks
+                                  :dev-mode? dev-mode? :ns (str *ns*)}))
+                        (or
+                         ;; Try fallback-locale & parents:
+                         ;(scoped-lookup-in dict kwks (preferred-loc [fallback-locale] supported?-scoped))
+                         (preferred-value [fallback-locale] scoped-lookup)
+                         ;; Try :missing in locales, parents, fallback-loc, & parents:
+                         (when-let [pattern (or (preferred-value ls (partial unscoped-lookup-in dict [:missing]))
+                                                (preferred-value [fallback-locale] (partial unscoped-lookup-in dict [:missing]))
+                                                )]
+                           (fmt-fn loc1 pattern (nstr ls) (nstr (scope-fn nil))
+                             (nstr ks))))))))]
           (if (nil? fmt-args) tr
             (if (nil? tr) (throw (Exception. "Can't format nil translation pattern"))
               (apply fmt-fn loc1 tr fmt-args))))))))
@@ -627,10 +644,10 @@ fallback-loc : a fall-back locale in case no match is found.
   (t :en example-tconfig [:invalid :example/foo])
   (t :en example-tconfig [:invalid "Explicit fallback"])
 
-  (def prod-t (create-t (assoc example-tconfig :dev-mode? false)))
+  (def prod-t (make-t (assoc example-tconfig :dev-mode? false)))
   (time (dotimes [_ 10000] (prod-t :en :example/foo)))            ; ~18ms
   (time (dotimes [_ 10000] (prod-t :en [:invalid :example/foo]))) ; ~38ms
-  (time (dotimes [_ 10000] (prod-t :en [:invalid nil])))          ; ~20ms
+  (time (dotimes [_ 10000] (prod-t :en [:invalid :example/foo])))          ; ~20ms
   )
 
 (defn dictionary->xliff [m]) ; TODO Use hiccup?
