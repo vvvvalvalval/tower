@@ -380,15 +380,18 @@
        )
 
 (defn specializes? 
-  "Whether child-loc is a specialization of parent-loc. 
-This induces an unstrict, partial order over all locales.
-All locales and nil specialize nil."
   [child-loc parent-loc]
   (if (nil? parent-loc)
     true ; the nil locale generalizes all locales.
     (some? (some #{parent-loc} (generalizations child-loc)))
     ))
-(def specializes? (memoize specializes?)) ;; memoizing for better perf.
+(def specializes? 
+  "[child-loc parent-loc]
+
+Whether child-loc is a specialization of parent-loc. 
+This induces an unstrict, partial order over all locales.
+All locales and nil specialize nil."
+  (memoize specializes?)) ;; memoizing for better perf.
 
 (facts "About `specializes`"
        (fact "specialization nominal cases"
@@ -407,7 +410,7 @@ All locales and nil specialize nil."
              (specializes? nil nil) => true
              )
        )
-(defn- loc-searcher [loc-lookup]
+(defn- loc-searcher [loc-lookup] ; curried function that searches the generalizations of a locale and returns the first [locale, value] pair where value is (loc-lookup loc) and is defined.
   (fn [loc]
     (loop [remaining-locs (generalizations loc)]
       (if-let [l (first remaining-locs)]
@@ -434,9 +437,9 @@ All locales and nil specialize nil."
          )
        )
 
-(defn preferred-loc-lookup
-  [accepted-locs lookup-loc]
-  (let [searcher (loc-searcher lookup-loc)]
+(defn best-loc-lookup
+  [accepted-locs lookup-for-loc]
+  (let [searcher (loc-searcher lookup-for-loc)]
     (loop [remaining accepted-locs
           [best-loc value :as result] nil]
       (if-let [loc (first remaining)]
@@ -453,31 +456,31 @@ All locales and nil specialize nil."
             )))
   )
 (facts 
-  "About `preferred-loc-lookup`"
+  "About `best-loc-lookup`"
   
   (fact "Nominal cases" 
-    (preferred-loc-lookup [:de :en-GB :en-US :fr :en] {:fr 1, :en-US 2}) => [:en-US 2]
-    (preferred-loc-lookup [:de :en-GB :en-US :fr :en] {:fr 1, :en-GB 2}) => [:en-GB 2]
-    (preferred-loc-lookup [:de :en-GB :en-US :fr] {:fr 1, :en 2}) => [:en 2])
+    (best-loc-lookup [:de :en-GB :en-US :fr :en] {:fr 1, :en-US 2}) => [:en-US 2]
+    (best-loc-lookup [:de :en-GB :en-US :fr :en] {:fr 1, :en-GB 2}) => [:en-GB 2]
+    (best-loc-lookup [:de :en-GB :en-US :fr] {:fr 1, :en 2}) => [:en 2])
   
   (fact 
     "No strict specialization accepted"
-    (preferred-loc-lookup [:en] {:en-US 1}) => nil
-    (preferred-loc-lookup [:en :fr] {:en-US 1 :fr 2}) => [:fr 2])
+    (best-loc-lookup [:en] {:en-US 1}) => nil
+    (best-loc-lookup [:en :fr] {:en-US 1 :fr 2}) => [:fr 2])
   
   (fact "An exact match for a locale trumps exact matches of subsequent specializations."
-        (preferred-loc-lookup [:en :en-US] {:en 1 :en-US 2}) => [:en 1])
+        (best-loc-lookup [:en :en-US] {:en 1 :en-US 2}) => [:en 1])
   
-  (fact "nil when no accepted locale has a supported generalization."
-    (preferred-loc-lookup [:fr] {:en 1}) => nil
-    (preferred-loc-lookup [:fr] {:fr-FR 1}) => nil)
+  (fact "Nil when no accepted locale has a supported generalization."
+    (best-loc-lookup [:fr] {:en 1}) => nil
+    (best-loc-lookup [:fr] {:fr-FR 1}) => nil)
   
-  (fact "Fallback or nil when the list of accepted locales is empty."
-    (preferred-loc-lookup [] {:fr 1, :en-US 2}) => nil)
+  (fact "Nil when the list of accepted locales is empty."
+    (best-loc-lookup [] {:fr 1, :en-US 2}) => nil)
   
   )
-(def preferred-loc (comp first preferred-loc-lookup))
-(def preferred-value (comp second preferred-loc-lookup))
+(def preferred-loc (comp first best-loc-lookup))
+(def find-for-best-loc (comp second best-loc-lookup))
 
 
 (def ^:private loc-tree
@@ -606,7 +609,7 @@ All locales and nil specialize nil."
               scoped-lookup (partial scoped-lookup-in dict kwks)
               tr (or
                   ;; Try locales & parents:
-                  (preferred-value ls scoped-lookup)
+                  (find-for-best-loc ls scoped-lookup)
                   (let [last-k (peek ks)]
                     (if-not (keyword? last-k)
                       last-k ; Explicit final, non-keyword fallback (may be nil)
@@ -617,10 +620,10 @@ All locales and nil specialize nil."
                         (or
                          ;; Try fallback-locale & parents:
                          ;(scoped-lookup-in dict kwks (preferred-loc [fallback-locale] supported?-scoped))
-                         (preferred-value [fallback-locale] scoped-lookup)
+                         (find-for-best-loc [fallback-locale] scoped-lookup)
                          ;; Try :missing in locales, parents, fallback-loc, & parents:
-                         (when-let [pattern (or (preferred-value ls (partial unscoped-lookup-in dict [:missing]))
-                                                (preferred-value [fallback-locale] (partial unscoped-lookup-in dict [:missing]))
+                         (when-let [pattern (or (find-for-best-loc ls (partial unscoped-lookup-in dict [:missing]))
+                                                (find-for-best-loc [fallback-locale] (partial unscoped-lookup-in dict [:missing]))
                                                 )]
                            (fmt-fn loc1 pattern (nstr ls) (nstr (scope-fn nil))
                              (nstr ks))))))))]
