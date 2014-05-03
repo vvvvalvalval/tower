@@ -410,24 +410,22 @@ All locales and nil specialize nil."
              (specializes? nil nil) => true
              )
        )
-(defn- loc-searcher [loc-lookup] ; curried function that searches the generalizations of a locale and returns the first [locale, value] pair where value is (loc-lookup loc) and is defined.
-  (fn [loc]
-    (loop [remaining-locs (generalizations loc)]
-      (if-let [l (first remaining-locs)]
-        (if-let [value (loc-lookup l)]
-          [l value] ; truthy lookup, we return the [locale,value] pair.
-          (recur (rest remaining-locs))) ; nothing, looking up generalizations.
-        nil ; no generalization of the initial loc yields a truthy lookup.
-        )
-      ))
-  )
+(defn- search-loc-and-parents 
+  [loc-lookup loc] ; curried function that searches the generalizations of a locale and returns the first [locale, value] pair where value is (loc-lookup loc) and is defined.
+  (loop [remaining-locs (generalizations loc)]
+    (if-let [l (first remaining-locs)]
+      (if-let [value (loc-lookup l)]
+        [l value] ; truthy lookup, we return the [locale,value] pair.
+        (recur (rest remaining-locs))) ; nothing, looking up generalizations.
+      nil ; no generalization of the initial loc yields a truthy lookup.
+      )))
 (facts "About `loc-searcher`"
        (let [my-loc-lookup {:en "How are you?"
                             :en-US "What's up?"
                             :en-GB "How do you do?"
                             :fr-FR "Comment allez-vous?"
                             :de "Wie geht's?"}
-             searcher (loc-searcher my-loc-lookup)]
+             searcher (partial search-loc-and-parents my-loc-lookup)]
          (searcher :en) => [:en "How are you?"]
          (searcher :de) => [:de "Wie geht's?"]
          (searcher :en-US) => [:en-US "What's up?"]
@@ -438,13 +436,13 @@ All locales and nil specialize nil."
        )
 
 (defn best-loc-lookup
+  "Searches for a locale for which lookup-for-loc returns a truthy value, while trying to be optimally compliant to the preference order in accepted-locs."
   [accepted-locs lookup-for-loc]
-  (let [searcher (loc-searcher lookup-for-loc)]
-    (loop [remaining accepted-locs
+  (loop [remaining accepted-locs
           [best-loc value :as result] nil]
       (if-let [loc (first remaining)]
         (if (specializes? loc best-loc)
-          (let [[new-loc new-val :as new-result] (searcher loc)]
+          (let [[new-loc new-val :as new-result] (search-loc-and-parents lookup-for-loc loc)]
             (if (= new-loc loc)
               new-result ; perfect match.
               (recur (rest remaining) ; at least better but not perfect match. Remember it and keep looking.
@@ -454,7 +452,6 @@ All locales and nil specialize nil."
           )
         result ;; covered all accepted locs. return result.
             )))
-  )
 (facts 
   "About `best-loc-lookup`"
   
@@ -593,13 +590,11 @@ All locales and nil specialize nil."
                 (fn [{:keys [locale ks scope] :as args}]
                   (timbre/logp (if dev-mode? :debug :warn)
                     "Missing translation" args))}} tconfig]
-
     (let [nstr          (fn [x] (if (nil? x) "nil" (str x)))
           dict-cached   (when-not dev-mode? (dict-compile* dictionary))
           scoped-lookup-in   (fn [d ks l] (some #(get-in d [(scope-fn %) l]) ks))
           unscoped-lookup-in (fn [d ks l] (some #(get-in d [% l]) ks))
           ]
-
       (fn new-t [l-or-ls k-or-ks & fmt-args]
         (let [dict (or dict-cached (dict-compile* dictionary)) ; Recompile (slow)
               ks   (if (sequential? k-or-ks) k-or-ks [k-or-ks])
@@ -619,7 +614,6 @@ All locales and nil specialize nil."
                                   :dev-mode? dev-mode? :ns (str *ns*)}))
                         (or
                          ;; Try fallback-locale & parents:
-                         ;(scoped-lookup-in dict kwks (preferred-loc [fallback-locale] supported?-scoped))
                          (find-for-best-loc [fallback-locale] scoped-lookup)
                          ;; Try :missing in locales, parents, fallback-loc, & parents:
                          (when-let [pattern (or (find-for-best-loc ls (partial unscoped-lookup-in dict [:missing]))
