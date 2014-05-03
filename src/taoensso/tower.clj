@@ -6,9 +6,13 @@
             [clojure.java.io :as io]
             [taoensso.encore :as encore]
             [taoensso.timbre :as timbre]
-            [taoensso.tower.utils :as utils :refer (defmem- defmem-*)])
+            [taoensso.tower.utils :as utils :refer (defmem- defmem-*)]
+            )
   (:import  [java.util Date Locale TimeZone Formatter]
-            [java.text Collator NumberFormat DateFormat]))
+            [java.text Collator NumberFormat DateFormat])
+  (:use midje.sweet
+        )
+  )
 
 ;;;; Locales (big L for the Java object) & bindings
 
@@ -357,23 +361,125 @@
         (throw (Exception. (format "Failed to load dictionary from resource: %s"
                                    dict) e))))))
 
+
+(def ^:private generalizations
+  (memoize
+    (fn generalizations-non-memoized [loc]
+           (let [loc-parts (str/split (-> loc locale-key name) #"[-_]")
+                 generalizations  (mapv #(keyword (str/join "-" %))
+                             (take-while identity (iterate butlast loc-parts)))]
+             generalizations)))
+  )
+(facts "About `generalizations`"
+       (generalizations :en) => [:en]
+       (generalizations :fr) => [:fr]
+       
+       (generalizations :en-US)  => [:en-US :en]
+       (generalizations :fr-FR) => [:fr-FR :fr]
+       )
+
+(defn specializes? 
+  "Whether child-loc is a specialization of parent-loc. 
+This induces an unstrict, partial order over all locales.
+All locales and nil specialize nil."
+  [child-loc parent-loc]
+  (if (nil? parent-loc)
+    true ; the nil locale generalizes all locales.
+    (some? (some #{parent-loc} (generalizations child-loc)))
+    ))
+(facts "About `specializes`"
+       (fact "specialization nominal cases"
+             (specializes? :en-US :en) => true
+             (specializes? :en-US :en-US) => true
+             (specializes? :fr :fr) => true
+             
+             (specializes? :en-US :en-GB) => false
+             (specializes? :en :en-GB) => false
+             (specializes? :fr-FR :en) => false
+             (specializes? :fr-FR :en-GB) => false
+             )
+       (fact "every locale specializes nil"
+             (specializes? :en nil) => true
+             (specializes? :fr-US nil) => true
+             (specializes? nil nil) => true
+             )
+       )
+
+(defn best-locale-among
+  "Finds the best supported locale that is either an accepted locale or a parent of an accepted locale.
+Returns fallback-loc or nil if no match found.
+
+accepted-locs : a seq of locales in descending preferrence order.
+supported? : a predicate for locales. Meant to be applied to the elements of accepted-locs and their parents.
+fallback-loc : a fall-back locale in case no match is found.
+"
+  [accepted-locs supported? & [fallback-loc]]
+  (or 
+    (loop [remaining accepted-locs
+          ; the best available locale found so far, or none if not found.
+          ; on each iteration, the value of best-match must specialize the previous.
+          ; when we encounter a locale that does not specialize best-match, we return best match.
+          best-match nil 
+          ]
+     (if-let [loc (first remaining)]
+       (if (specializes? loc best-match)
+         (let [new-best-match (some supported? (generalizations loc)) ; will be a specialization of best-match.
+               ]
+           (recur (rest remaining)
+                  new-best-match
+                ))
+         best-match ; the current locale does not specialize the best match; we stop looking.
+         )
+       best-match ; we've covered the whole list of available locales, return best match
+       )
+     )
+    fallback-loc)
+  )
+(facts 
+  "About `best-locale-among`"
+  
+  (fact "Nominal cases" 
+    (best-locale-among [:de :en-GB :en-US :fr :en] #{:fr :en-US}) => :en-US
+    (best-locale-among [:de :en-GB :en-US :fr :en] #{:fr :en-GB}) => :en-GB
+    (best-locale-among [:de :en-GB :en-US :fr] #{:fr :en}) => :en)
+  
+  (fact 
+    "No specialization accepted"
+    (best-locale-among [:en] #{:en-US}) => nil
+    (best-locale-among [:en :fr] #{:en-US :fr}) => :fr)
+  
+  (fact 
+    "Fallback or nil when no accepted locale has a supported generalization."
+    (best-locale-among [:fr] #{:en}) => nil
+    (best-locale-among [:fr] #{:en} :de) => :de
+    (best-locale-among [:fr] #{:fr-FR} :de) => :de)
+  
+  (fact 
+    "Fallback or nil when the list of accepted locales is empty."
+    (best-locale-among [] #{:fr :en-US}) => nil
+    (best-locale-among [] #{:fr :en-US} :de) => :de
+    )
+  
+  )
+
+
 (def ^:private loc-tree
-  ":en-US-var1                   -> [:en-US-var1 :en-US :en]
+   ":en-US-var1                   -> [:en-US-var1 :en-US :en]
    [:en-US-var1 :fr-FR-var1 :fr] -> [:en-US-var1 :en-US :en :fr-FR-var1 :fr-FR :fr]"
-  (let [loc-tree*
-        (fn [loc]
-          (let [loc-parts (str/split (-> loc locale-key name) #"[-_]")
-                loc-tree  (mapv #(keyword (str/join "-" %))
-                            (take-while identity (iterate butlast loc-parts)))]
-            loc-tree))]
-    (memoize ; Also used runtime by translation fns
-      (fn [loc-or-locs]
-        (if-not (vector? loc-or-locs)
-          (loc-tree* loc-or-locs) ; Build search tree from single locale
-          (->> loc-or-locs ; Build search tree from multiple desc-preference locales
-               (mapv loc-tree*)
-               (reduce into) ; (apply encore/interleave-all)
-               (encore/distinctv)))))))
+   (let [loc-tree*
+         (fn [loc]
+           (let [loc-parts (str/split (-> loc locale-key name) #"[-_]")
+                 loc-tree  (mapv #(keyword (str/join "-" %))
+                             (take-while identity (iterate butlast loc-parts)))]
+             loc-tree))]
+     (memoize ; Also used runtime by translation fns
+       (fn [loc-or-locs]
+         (if-not (vector? loc-or-locs)
+           (loc-tree* loc-or-locs) ; Build search tree from single locale
+           (->> loc-or-locs ; Build search tree from multiple desc-preference locales
+                (mapv loc-tree*)
+                (reduce into) ; (apply encore/interleave-all)
+                (encore/distinctv)))))))
 
 (comment (map loc-tree [:en-US [:en-US] [:en-US :fr-FR :fr :en]])
          (loc-tree ["en_GB" "en_US" "fr_FR" "en"]))

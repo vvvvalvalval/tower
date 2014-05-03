@@ -1,3 +1,4 @@
+.settings
 /target/
 /lib/
 /classes/
@@ -11,3 +12,5 @@
 /pom.xml*
 /.env
 .DS_Store
+.classpath
+.project
