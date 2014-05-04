@@ -384,7 +384,7 @@
 (defn find-for-best-locale
   "[accepted-locs lookup-for-loc]
 
-Finds the preferred locale for which the provided lookup yields a non-nil value, and returns that value.
+Finds the preferred locale for which the provided lookup yields a truthy value, and returns that value.
 
 accepted-locs : a sequence of accepted locales in descending preferrence order.
 lookup-for-loc : a lookup function that takes one locale argument.
@@ -393,13 +393,12 @@ lookup-for-loc : a lookup function that takes one locale argument.
   (->> accepted-locs
     loc-tree
     (map lookup-for-loc)
-    (filter some?)
-    first))
+    (some identity)))
 
 (defn best-locale-lookup
   "[accepted-locs lookup-for-loc]
 
-Searches for a locale for which lookup-for-loc returns a non-nil value, while trying to be optimally compliant to the preference order in accepted-locs.
+Searches for a locale for which lookup-for-loc returns a truthy value, while trying to be optimally compliant to the preference order in accepted-locs.
 Returns a {:locale loc, :value v} map where loc is the best locale for which the lookup was successful (i.e truthy), and v is the looked-up value, or nil if no match found.
 
 accepted-locs : a sequence of accepted locales in descending preferrence order.
