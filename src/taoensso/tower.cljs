@@ -38,22 +38,30 @@
   (def my-dict-inline   (tower-macros/dict-compile {:en {:a "**hello**"}}))
   (def my-dict-resource (tower-macros/dict-compile "slurps/i18n/utils.clj")))
 
-(def ^:private loc-tree ; Crossover (direct)
+(def ^:private loc-tree
   (let [loc-tree*
         (memoize
           (fn [loc]
             (let [loc-parts (str/split (-> loc locale-key name) #"[-_]")
                   loc-tree  (mapv #(keyword (str/join "-" %))
                               (take-while identity (iterate butlast loc-parts)))]
-              loc-tree)))]
-    (identity ; memoize ; Also used runtime by translation fns
+              loc-tree)))
+        loc-primary (memoize (fn [loc] (peek  (loc-tree* loc))))
+        loc-nparts  (memoize (fn [loc] (count (loc-tree* loc))))]
+    (encore/memoize* 80000 nil ; Also used runtime by translation fns
       (fn [loc-or-locs]
         (if-not (vector? loc-or-locs)
           (loc-tree* loc-or-locs) ; Build search tree from single locale
-          (->> loc-or-locs ; Build search tree from multiple locales
-               (mapv loc-tree*)
-               (reduce into) ; (apply encore/interleave-all)
-               (encore/distinctv)))))))
+          ;; Build search tree from multiple desc-preference locales:
+          (let [primary-locs (->> loc-or-locs (mapv loc-primary) (encore/distinctv))
+                primary-locs-sort (zipmap primary-locs (range))]
+            (->> loc-or-locs
+                 (mapv loc-tree*)
+                 (reduce into)
+                 (encore/distinctv)
+                 (sort-by #(- (* 10 (primary-locs-sort (loc-primary %) 0))
+                              (loc-nparts %)))
+                 (vec))))))))
 
 (defn make-t ; Crossover (modified)
   [tconfig] {:pre [(map? tconfig) ; (:dictionary tconfig)
